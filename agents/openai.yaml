@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档还原为 Markdown"
+  short_description: "清洗 Word、PDF 和 OCR 文本，保留原文结构与法律编号，并将长文交付为 Markdown 文件"
+  default_prompt: "使用 $restore-document-markdown 清洗我提供的文档并还原为 Markdown。"

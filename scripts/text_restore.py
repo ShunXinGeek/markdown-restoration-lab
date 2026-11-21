@@ -37,7 +37,7 @@ PAGE_NUMBER = re.compile(
     re.IGNORECASE,
 )
 DIVIDER = re.compile(r"^(?:_{4,}|-{3,}|[─━—=]{4,})$")
-OCR_NOISE = re.compile(r"[\u0000-\u0008\u000b\u000e-\u001f\u007f\ufffd]")
+OCR_NOISE = re.compile(r"[\u0000-\u0008\u000b\u000e-\u001f\u007f]")
 NOTE = re.compile(r"^(?:[¹²³⁰⁴⁵⁶⁷⁸⁹]+|[①-⑳]|\[[0-9]{1,3}\]|[0-9]{1,3}[.)]?)(?:\s+|(?=[\u3400-\u9fff]))\S")
 RULED_NOTE = re.compile(r"^(?:[¹²³⁰⁴⁵⁶⁷⁸⁹]+|[①-⑳]|\[[0-9]{1,3}\]|[0-9]{1,3})(?:\s+|(?=[\u3400-\u9fff]))\S")
 DEFINITION = re.compile(r"^\[\^([^\]\s]+)\]:")
@@ -145,12 +145,10 @@ def clean_pages(pages: list[Page]) -> list[list[str]]:
                 footnote_ids.add(match[1])
                 definition = True
                 continue
-            if DIVIDER.fullmatch(value) and (
-                value != "---" or page.paged and index >= len(rows) // 2
-            ):
+            if DIVIDER.fullmatch(value) and page.paged and index >= len(rows) // 2:
                 following = next((row.text.strip() for row, _ in rows[index + 1:] if row.text.strip()), "")
                 note_block = page.paged and bool(RULED_NOTE.match(following)) and index >= len(rows) // 2
-                if note_block or value != "---":
+                if note_block:
                     continue
             near_bottom = line.top is not None and line.top >= 0.73
             small = bool(near_bottom and body_size and line.size and line.size <= body_size * 0.83)
@@ -220,7 +218,7 @@ def reconstruct(pages: list[Page], legal: bool = False, structured: bool = False
         if lines:
             lines.append("\f" if section and page.status != "unreadable" else "")
         lines.extend(section[start:])
-    lines = escape_paragraph_labels(lines, legal and not structured)
+    lines = escape_paragraph_labels(lines, legal)
     masks = opaque([Line(line) for line in lines])
     out = []
     across_page = False

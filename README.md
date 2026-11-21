@@ -1,21 +1,19 @@
-# restore-document-markdown
+# MarkItDown Skill
 
-一个将 Word 文档、文本型或扫描型 PDF，以及 OCR 文本还原为 Markdown 的 Codex Skill。它清理脚注、页底数字行和疑似 OCR 乱码，保留法律段落编号、列表、表格及代码。长文写入完整的 UTF-8 `.md` 文件。
+将 PDF（含扫描页和混合页面）、Office、HTML 与 OCR 文本还原为可编辑的 Markdown，并生成来源映射、删除记录和全文审计。详见 [SKILL.md](SKILL.md)。
 
 ## 安装
 
-将仓库克隆到 Codex 的 Skills 目录，使 `SKILL.md` 位于 `~/.codex/skills/restore-document-markdown/SKILL.md`。随后可在 Codex 中使用 `$restore-document-markdown`。
+将此仓库克隆到 Codex 的 Skills 目录，并将目录命名为 `markitdown`，使入口位于 `~/.codex/skills/markitdown/SKILL.md`。随后可在 Codex 中调用 `$markitdown`。
 
-文件提取使用本地 Python 和 Node.js。PDF 需要 PyMuPDF。DOCX 转换和扫描页 OCR 需要本地安装的 `markdown-converter` Skill。扫描页还需要本地 `tesseract.js` 和对应语言数据。可通过 `--converter-dir`、`--node-modules-dir` 和 `--node` 指定安装位置。旧版 `.doc` 需先在本地另存为 `.docx`。
+## 运行环境
 
-## 命令行
+当前版本的 Windows 包装脚本使用本机预装的 `D:\CodexTools\markitdown\.venv` 和 `D:\CodexTools\pdf-layout\.venv`，Marker 模型与字体缓存在 `D:\CodexTools\pdf-layout\cache`。在其他电脑上使用前，需要安装对应依赖，并调整 `scripts/convert.ps1`、`scripts/marker_adapter.py` 和 `SKILL.md` 中的环境路径。扫描页 OCR 使用 Windows 本地语言包。
+
+## 用法
 
 ```powershell
-python scripts/restore.py "source.pdf" --legal-numbering --ocr-language eng+chi_sim -o "restored.md"
-python scripts/restore.py "source.docx" -o "restored.md"
-python scripts/restore.py "ocr.txt" --chat
+& .\scripts\convert.ps1 -InputPath source.pdf -OutputPath output.md -ReviewDir work-review
 ```
 
-`--chat` 用于短文本，输出包裹在 Markdown 代码围栏中。文件模式直接写入 Markdown 源码。输出路径须是尚未存在的 `.md` 文件，原文件不会被修改。
-
-脚本在标准错误输出中报告处理状态和 PDF 的逐页状态。不可读页会列出原始页号，并将已恢复内容写入 `.partial.md`。对重要法律编号、跨页段落和复杂表格，按 [复核指南](references/review.md) 对照原件检查。
+法律文档可加 `-LegalNumbering`。输出审计文件位于指定的复核目录；请按 [SKILL.md](SKILL.md) 的步骤检查发现项并复核结果。转换与复核规则见 [references/conversion-rules.md](references/conversion-rules.md) 和 [references/restoration-modes.md](references/restoration-modes.md)。

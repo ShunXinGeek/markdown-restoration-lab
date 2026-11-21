@@ -1,10 +1,10 @@
-# MarkItDown Skill
+# Markdown Restoration Lab
 
 将 PDF（含扫描页和混合页面）、Office、HTML 与 OCR 文本还原为可编辑的 Markdown，并生成来源映射、删除记录和全文审计。详见 [SKILL.md](SKILL.md)。
 
 ## 安装
 
-将此仓库克隆到 Codex 的 Skills 目录，并将目录命名为 `markitdown`，使入口位于 `~/.codex/skills/markitdown/SKILL.md`。随后可在 Codex 中调用 `$markitdown`。
+将此仓库克隆到 Codex 的 Skills 目录，并将目录命名为 `markdown-restoration-lab`，使入口位于 `~/.codex/skills/markdown-restoration-lab/SKILL.md`。随后可在 Codex 中调用 `$markdown-restoration-lab`。
 
 ## 运行环境
 

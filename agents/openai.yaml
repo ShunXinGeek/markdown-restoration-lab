@@ -1,4 +1,4 @@
 interface:
-  display_name: "MarkItDown 文档还原"
+  display_name: "Markdown Restoration Lab"
   short_description: "将 PDF、Office、HTML 和 OCR 文本还原为 Markdown，并审计来源覆盖"
-  default_prompt: "使用 $markitdown 将我提供的文档还原为 Markdown，并按 skill 要求复核。"
+  default_prompt: "使用 $markdown-restoration-lab 将我提供的文档还原为 Markdown，并按 skill 要求复核。"

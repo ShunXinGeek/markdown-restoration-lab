@@ -1,9 +1,9 @@
 ---
-name: markitdown
+name: markdown-restoration-lab
 description: Convert PDF (including scans and mixed pages), Office, HTML and OCR text to editable Markdown. Restore reading order, clean footnotes and page furniture, protect legal numbering, and audit PDF source coverage. Use for document restoration and faithful transcription.
 ---
 
-# MarkItDown
+# Markdown Restoration Lab
 
 Use the installed wrapper to produce Markdown plus a source map, deletion ledger and whole-document audit. The default verification is automatic checks, targeted source review and representative sampling. Deliver a reviewed result and accurately report unresolved content.
 

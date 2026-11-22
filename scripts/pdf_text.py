@@ -87,34 +87,74 @@ def _reference_spans(text: str, chars: list[dict], normal_size: float) -> tuple:
     return tuple(spans)
 
 
-def _remove_footnotes(pages: list[tuple[float, list[Line]]]) -> list[tuple[float, list[Line]]]:
+def _remove_footnotes(pages: list[tuple[float, list[Line]]], separators=None,
+                      findings=None, protected_ids=None) -> list[tuple[float, list[Line]]]:
     """Remove conventional bottom notes, then their matched small-font labels.
 
     Layout and OCR can make notes ambiguous. Targeted source review resolves
     remaining note text or corrupted reference marks.
     """
+    separators = separators or {}
+    protected_ids = protected_ids or set()
     labels_by_page = {}
     result = []
+    all_sizes = [l.size for _, lines in pages for l in lines if l.size]
+    body_size = statistics.median(all_sizes) if all_sizes else 12
+    continued = False
     marker = re.compile(r"^\[?\(?([A-Za-z]{1,3}|\d{1,3}|[†‡*]+)[\].),:：、]?\s+\S")
     for height, lines in pages:
         if not lines:
             result.append((height, lines))
+            continued = False
             continue
-        normal_size = statistics.median(line.size for line in lines)
+        normal_size = max(body_size, statistics.median(line.size for line in lines))
+        refs = {span[2] for line in lines for span in line.reference_spans
+                if not re.search(r'[=∫∑√]', line.text)}
+        rules = separators.get(lines[0].page, [])
         active = False
         kept = []
         previous = None
+        removed = []
         for line in lines:
+            if line.source_id in protected_ids:
+                kept.append(line)
+                active = False
+                previous = line
+                continue
             small = line.size < normal_size * 0.9
             match = marker.match(line.text) if small and line.top > height * 0.65 else None
             isolated = previous is not None and line.top - previous.bottom > normal_size
-            if match and (isolated or active):
+            ruled = any(y <= line.top and (previous is None or previous.bottom <= y + 2)
+                        for y in rules)
+            # Parenthesized/bracketed legal list items are body text unless both a
+            # note separator and a matching superscript independently support removal.
+            list_label = bool(re.match(r'^\(?\d+\)|^\[\d+\]', line.text))
+            linked = bool(match and match[1] in refs)
+            starts_note = bool(match and (linked or ruled) and (isolated or ruled or active)
+                               and (not list_label or (linked and ruled)))
+            starts_continuation = bool(continued and ruled and small and not match)
+            if starts_note:
                 labels_by_page.setdefault(line.page, set()).add(match[1])
+                active = True
+            elif starts_continuation:
                 active = True
             if not (active and small):
                 kept.append(line)
                 active = False
+                if (findings is not None and small and match and not _page_number(line.text)):
+                    findings.append({'code': 'note_candidate', 'page': line.page, 'severity': 'warning',
+                                     'source_ids': [line.source_id],
+                                     'message': 'Small numbered bottom text retained: insufficient footnote evidence.'})
+                elif findings is not None and small and ruled and not match:
+                    findings.append({'code': 'note_continuation_candidate', 'page': line.page, 'severity': 'warning',
+                                     'source_ids': [line.source_id],
+                                     'message': 'Unlabelled small text below a separator retained; inspect for a continued note.'})
+            else:
+                removed.append(line)
             previous = line
+        content_notes = [l for l in removed if not _page_number(l.text)]
+        continued = bool(content_notes and content_notes[-1].bottom > height * .8
+                         and not re.search(r'[.!?。！？][\"\'”’)]*$', content_notes[-1].text))
         result.append((height, kept))
 
     cleaned = []
@@ -134,14 +174,17 @@ def _remove_footnotes(pages: list[tuple[float, list[Line]]]) -> list[tuple[float
 
 
 def _margin_key(line: Line, height: float):
-    if (_starts_block(line.text) or re.search(r"[。！？;；]$", line.text)
-            or (line.bold and not re.search(r"\b(?:Ch\.|Sec\.|Part|Chapter)\b", line.text))):
-        return None
     if line.top < height * 0.16:
         side, distance = "top", line.top
     elif line.bottom > height * 0.88:
         side, distance = "bottom", height - line.bottom
     else:
+        return None
+    # A dash-delimited folio ("- 21 -") is a page number, not a bulleted list item.
+    if re.fullmatch(r"[-–—]\s*\d+\s*[-–—]", line.text.strip()):
+        return side, round(distance / 4), round(line.x0 / 6), line.font, "#"
+    if (_starts_block(line.text) or re.search(r"[。！？;；]$", line.text)
+            or (line.bold and not re.search(r"\b(?:Ch\.|Sec\.|Part|Chapter)\b", line.text))):
         return None
     # The same running header can have a different section, page or date on each page.
     pattern = _key(line.text)
@@ -149,9 +192,17 @@ def _margin_key(line: Line, height: float):
         chinese_locator = re.match(
             r"^(?:\d+(?:[-–]\d+)?\s+)?第\s*\d+\s*(?:章|部|節|节|條|条)(?:\s|$)", pattern
         )
-        if side == "bottom" or chinese_locator or re.match(r"(?:part|chapter|section|page|vol(?:ume)?)\s+\d", pattern):
+        # A page locator can sit anywhere in an ECM/ECF-style header, not only at the start.
+        page_locator = re.search(r"\bpage\s+\d+\s*(?:of|/)\s*\d+|\bpage\s+\d+\b|\bpageid\s+\d+", pattern)
+        if (side == "bottom" or chinese_locator or page_locator
+                or re.match(r"(?:part|chapter|section|page|vol(?:ume)?)\s+\d", pattern)):
             pattern = re.sub(r"\d+", "#", pattern)
     return side, round(distance / 4), round(line.x0 / 6), line.font, pattern
+
+
+def _header_locator(line: Line, height: float) -> bool:
+    key = _margin_key(line, height)
+    return bool(key and re.search(r"pageid|\bpage\s+#", key[4]))
 
 
 def _remove_furniture(pages: list[tuple[float, list[Line]]]) -> list[list[Line]]:
@@ -175,12 +226,16 @@ def _remove_furniture(pages: list[tuple[float, list[Line]]]) -> list[list[Line]]
     cleaned: list[list[Line]] = []
     for i, (height, lines) in enumerate(pages):
         keep = []
-        for line in lines:
+        header_locator = bool(lines) and _header_locator(lines[0], height)
+        for j, line in enumerate(lines):
             key = _margin_key(line, height)
             repeated = key is not None and counts[key] >= 2
-            numbered = key is not None and key[0] == "bottom" and _page_number(line.text)
+            numbered = _page_number(line.text) and line.bottom > height * 0.88
             folio = line is lines[0] and i in folios and recurring[folios[i]] >= 2
-            if not (repeated or numbered or folio):
+            # A wrapped ECM/ECF header can leave its PageID number on a second top line.
+            wrapped_id = (header_locator and j <= 2 and line.top < height * 0.06
+                          and re.fullmatch(r"\d{1,5}", line.text.strip()))
+            if not (repeated or numbered or folio or wrapped_id):
                 keep.append(line)
         cleaned.append(keep)
     return cleaned
@@ -189,11 +244,26 @@ def _remove_furniture(pages: list[tuple[float, list[Line]]]) -> list[list[Line]]
 def _starts_block(text: str) -> bool:
     if re.match(r"^\*(?:\s*\*){2}", text):
         return False
-    return bool(re.match(r"^(?:[#>•*]\s|[-–]\s|\d+[.)、]\s|\[\d+\]\s|\((?:\d+[a-z]?|[A-Za-z]|[ivxlcdm]+)\)\s|\|)", text))
+    return bool(re.match(r"^(?:[#>•*]\s|[-–]\s|\d+[.)、]\s|[a-z][.)]\s|\[\d+\]\s|\((?:\d+[a-z]?|[A-Za-z]|[ivxlcdm]+)\)\s|\|)", text))
+
+
+def _typical_gap(lines: list[Line], reference: Line | None = None) -> float:
+    """Estimate observed spacing within a font-size region, including double spacing."""
+    size = reference.size if reference else statistics.median(l.size for l in lines)
+    gaps = [b.top - a.top for a, b in zip(lines, lines[1:])
+            if 0 < b.top - a.top < max(50, size * 4)
+            and abs(a.size - b.size) < .8
+            and (reference is None or (abs(a.size - size) < .8
+                                       and a.bold == reference.bold))]
+    return sorted(gaps)[(len(gaps) - 1) // 4] if gaps else size * 1.2
 
 
 def _line_separator(previous: Line, current: Line, typical_gap: float, body_x: float, right_edge: float) -> str:
     gap = current.top - previous.top
+    if abs(current.size - previous.size) > max(1, previous.size * .12):
+        return "\n\n"
+    if current.x0 > previous.x1 + 30:
+        return "\n\n"
     if any(re.fullmatch(r"(?:\*\s*){3,}", l.text) for l in (previous, current)):
         return "\n\n"
     if gap > typical_gap * 1.25 + 0.5:
@@ -211,12 +281,15 @@ def _line_separator(previous: Line, current: Line, typical_gap: float, body_x: f
         return "\n\n"
     if _starts_block(current.text) or previous.bold != current.bold:
         return "\n\n"
+    if (_starts_block(previous.text) and re.search(r'[.!?。！？]$', previous.text)
+            and current.x0 < previous.x0 - 9):
+        return "\n\n"
     if current.lead_bold and not previous.lead_bold and current.x0 < previous.x0 - 5:
         return "\n\n"
     # A first-line indent after a short finished line is different from the
     # hanging indent on every continuation line of a numbered clause.
-    if (current.x0 > previous.x0 + 9 and current.x0 > body_x + 5
-            and previous.x1 < right_edge - 22 and re.search(r"[.!?。！？]$", previous.text)):
+    if (current.x0 > previous.x0 + 9 and current.x0 > body_x + 12
+            and previous.x0 < body_x + 5):
         return "\n\n"
     if (re.search(r"[。！？.!?:：；;]$", previous.text)
             and previous.x1 < right_edge - 22
@@ -232,12 +305,7 @@ def _line_separator(previous: Line, current: Line, typical_gap: float, body_x: f
 def _page_text(lines: list[Line]) -> str:
     if not lines:
         return ""
-    gaps = [b.top - a.top for a, b in zip(lines, lines[1:]) if 0 < b.top - a.top < 40]
-    type_size = statistics.median(line.size or line.bottom - line.top for line in lines)
-    typical_gap = type_size * 1.2
-    if gaps:
-        # Use the lower quartile because paragraph breaks increase the baseline gap.
-        typical_gap = min(sorted(gaps)[(len(gaps) - 1) // 4], type_size * 1.4)
+    typical_gap = _typical_gap(lines)
     body_x = statistics.median(line.x0 for line in lines)
     right_edges = sorted(line.x1 for line in lines)
     right_edge = right_edges[int((len(right_edges) - 1) * 0.75)]
@@ -258,6 +326,10 @@ def _page_text(lines: list[Line]) -> str:
 
 def _join_pages(previous: Line, next_lines: list[Line], previous_height: float, next_height: float) -> bool:
     next_line = next_lines[0]
+    if abs(previous.size - next_line.size) > max(1, previous.size * .12):
+        return False
+    if next_line.x0 > min(l.x0 for l in next_lines) + 9:
+        return False
     if any(re.fullmatch(r"(?:\*\s*){3,}", line.text) for line in (previous, next_line)):
         return False
     if previous.bottom < previous_height * 0.72 or next_line.top > next_height * 0.28:

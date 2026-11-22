@@ -7,17 +7,40 @@ import os
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-def marker_page(source: Path, page: dict, review_dir: Path) -> list[dict]:
-    output = review_dir / f"marker-p{page['page']}.json"
+def marker_batch_json(source: Path, pages: list[dict], review_dir: Path,
+                      batch_size: int = 20) -> dict[int, dict]:
+    """Run Marker once per batch; model loading is shared by every page in the batch."""
     python = os.environ.get('MARKITDOWN_MARKER_PYTHON', r'D:\CodexTools\pdf-layout\.venv\Scripts\python.exe')
-    command = [python, '-X', 'utf8', str(Path(__file__).with_name('marker_worker.py')),
-               str(source.resolve()), str(page['page'] - 1), str(output.resolve())]
-    process = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=180)
-    (review_dir / f"marker-p{page['page']}.log").write_text(process.stdout + process.stderr, encoding='utf-8')
-    if process.returncode:
-        raise RuntimeError(process.stderr[-1200:])
-    typed = json.loads(output.read_text(encoding='utf-8'))
+    worker = str(Path(__file__).with_name('marker_worker.py'))
+    review_dir.mkdir(parents=True, exist_ok=True)
+    typed_by_page = {}
+    for start in range(0, len(pages), batch_size):
+        batch = pages[start:start + batch_size]
+        numbers = [p['page'] for p in batch]
+        command = [python, '-X', 'utf8', worker, str(source.resolve()),
+                   ','.join(str(n) for n in numbers), str(review_dir.resolve())]
+        process = subprocess.run(command, capture_output=True, text=True, encoding='utf-8',
+                                 timeout=180 * max(1, len(numbers)))
+        (review_dir / f"marker-batch-{numbers[0]}-{numbers[-1]}.log").write_text(
+            process.stdout + process.stderr, encoding='utf-8')
+        if process.returncode:
+            raise RuntimeError(process.stderr[-1200:])
+        for number in numbers:
+            path = review_dir / f"marker-p{number}.json"
+            typed_by_page[number] = json.loads(path.read_text(encoding='utf-8'))
+    return typed_by_page
 
+
+def marker_pages(source: Path, pages: list[dict], review_dir: Path) -> dict[int, list[dict]]:
+    typed = marker_batch_json(source, pages, review_dir)
+    return {page['page']: blocks_from_page(typed[page['page']], page) for page in pages}
+
+
+def marker_page(source: Path, page: dict, review_dir: Path) -> list[dict]:
+    return marker_pages(source, [page], review_dir)[page['page']]
+
+
+def blocks_from_page(typed: dict, page: dict) -> list[dict]:
     result = []
     used = set()
     def walk(node):

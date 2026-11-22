@@ -8,6 +8,7 @@ import hashlib
 import re
 import statistics
 import unicodedata
+from time import perf_counter
 
 import pdfplumber
 
@@ -70,7 +71,13 @@ def extract_page(page) -> dict:
             chars = [c for c in page.chars if line.x0 - 1 <= c["x0"] <= line.x1 + 1
                      and line.top - 2 <= c["top"] <= line.bottom]
             formula_lines[line.source_id] = formula_latex(chars)
+    note_rules = [edge['top'] for edge in page.edges
+                  if abs(edge.get('bottom', edge['top']) - edge['top']) < 2
+                  and page.height * .45 < edge['top'] < page.height * .95
+                  and 30 < edge['x1'] - edge['x0'] < page.width * .8
+                  and edge['x0'] < page.width * .25]
     return {"page": page.page_number, "width": page.width, "height": page.height,
+            "note_separators": note_rules,
             "column_split": split, "lines": lines, "tables": tables, "math": math,
             "table_hint": aligned_numeric_rows >= 3,
             "formula_lines": formula_lines,
@@ -83,20 +90,57 @@ def _markdown_text(text: str) -> str:
     text = re.sub(r"^(\d+)\.\s", lambda m: m[1] + r"\. ", text)
     text = re.sub(r"\*\s*\*\s*\*", lambda _: r"\* \* \*", text)
     text = re.sub(r"(?<!\\)\[(\d+(?:[-,]\d+)*)\]", lambda m: r"\[" + m[1] + r"\]", text)
+    # Prose currency must not become a math delimiter. Formula blocks bypass this.
+    text = re.sub(r'(?<!\\)\$(?=\d)', r'\\$', text)
     return text
+
+
+def _heading_level(line: flow.Line, body_size: float, body_x: float) -> int:
+    text = line.text
+    styled = line.bold or line.lead_bold
+    italic = 'italic' in line.font.lower() or 'oblique' in line.font.lower()
+    if styled and re.match(r'^\d+\.\s', text):
+        return 2
+    if styled and re.match(r'^[IVX]+[.)]\s+\w', text):
+        return 2
+    if styled and re.match(r'^[A-Z][.)]\s+\w', text):
+        return 3
+    if italic and line.x0 > body_x + 20 and re.match(r'^[ivx]+\.\s+\w', text):
+        return 4
+    if len(text) < 100:
+        if line.size > body_size * 1.18:
+            return 1 if line.size > body_size * 1.25 else 2
+        if (styled and text.isupper() and len(text) < 45 and line.x0 > body_x + 50
+                and line.size >= body_size * .95):
+            return 1
+        if re.fullmatch(r'Article\s+\d+[A-Z]?', text):
+            return 4
+    return 0
 
 
 def _paragraphs(lines: list[flow.Line]) -> list[dict]:
     if not lines:
         return []
-    gaps = [b.top - a.top for a, b in zip(lines, lines[1:]) if 0 < b.top - a.top < 40]
-    size = statistics.median(l.size or l.bottom - l.top for l in lines)
-    gap = min(sorted(gaps)[(len(gaps) - 1) // 4], size * 1.4) if gaps else size * 1.2
-    body_x = statistics.median(l.x0 for l in lines)
+    ordinary = [l for l in lines if not l.bold and 'italic' not in l.font.lower()]
+    body_x = min(l.x0 for l in (ordinary or lines))
+    body_lines = [l for l in lines if not l.bold and 'italic' not in l.font.lower()
+                  and l.x0 < body_x + 6]
+    size = statistics.median(l.size or l.bottom - l.top for l in (body_lines or lines))
     edge = sorted(l.x1 for l in lines)[int((len(lines) - 1) * .75)]
+    gaps = {key: flow._typical_gap(lines, line)
+            for key, line in {(round(l.size), l.bold): l for l in lines}.items()}
     groups = [[lines[0]]]
     for previous, current in zip(lines, lines[1:]):
-        if flow._line_separator(previous, current, gap, body_x, edge) == " ":
+        previous_level = _heading_level(groups[-1][0], size, body_x)
+        current_level = _heading_level(current, size, body_x)
+        heading_continuation = (previous_level and not current_level
+                                and previous.font == current.font
+                                and abs(previous.size - current.size) < .8
+                                and current.x0 >= groups[-1][0].x0
+                                and previous.x1 > edge - 30
+                                and not re.search(r'[.!?:;]$', previous.text))
+        separator = flow._line_separator(previous, current, gaps[(round(previous.size), previous.bold)], body_x, edge)
+        if heading_continuation or (not previous_level and not current_level and separator == " "):
             groups[-1].append(current)
         else:
             groups.append([current])
@@ -106,18 +150,12 @@ def _paragraphs(lines: list[flow.Line]) -> list[dict]:
         for line in group[1:]:
             text = flow._join_text(text, line.text)
         first = group[0]
-        heading = (first.bold or first.lead_bold) and bool(re.match(r"^\d+\.\s", first.text))
-        level = 2 if heading else 0
-        if len(group) == 1 and len(text) < 100:
-            if first.size > size * 1.18:
-                level = 1 if first.size > size * 1.25 else 2
-            elif re.match(r"^(?:[IVX]+|[A-Z])[.)]\s+\w", text):
-                level = 2 if re.match(r"^[IVX]+[.)]", text) else 3
-            elif re.fullmatch(r"Article\s+\d+[A-Z]?", text):
-                level = 4
+        level = _heading_level(first, size, body_x)
         heading = bool(level)
+        quote = not heading and all(l.x0 > body_x + 20 and l.size < size * .9 for l in group)
         result.append({"kind": "heading" if heading else "paragraph", "text": text,
-                       "markdown": "#" * level + " " + text if heading else _markdown_text(text),
+                       "markdown": "#" * level + " " + text if heading else ('> ' if quote else '') + _markdown_text(text),
+                       "quote": quote,
                        "source_ids": [l.source_id for l in group],
                        "pages": sorted({l.page for l in group})})
     return result
@@ -157,19 +195,46 @@ def _remove_rotated_watermarks(page, ledger: list) -> list:
 
 def convert_pdf(source: Path, engine: str, review_dir: Path,
                 ocr_language: str = 'eng+chi_sim', ocr: bool = True) -> dict:
+    started = perf_counter()
+    timings = {}
     review_dir.mkdir(parents=True, exist_ok=True)
     ledger = []
     with pdfplumber.open(source) as pdf:
         pages = [extract_page(_remove_rotated_watermarks(p, ledger)) for p in pdf.pages]
+    timings['extract_text'] = perf_counter() - started
+    stage = perf_counter()
     from local_ocr import recover_pages
     issues = recover_pages(source, pages, review_dir, ocr_language, ocr)
+    timings['ocr'] = perf_counter() - stage
+    stage = perf_counter()
     pairs = [(p["height"], p["lines"]) for p in pages]
-    without_notes = flow._remove_footnotes(pairs)
+    table_ids = {l.source_id for p in pages for table in p['tables'] for l in p['lines']
+                 if table['bbox'][0] - 2 <= l.x0 <= table['bbox'][2]
+                 and table['bbox'][1] - 2 <= l.top <= table['bbox'][3]}
+    without_notes = flow._remove_footnotes(pairs,
+                    {p['page']: p.get('note_separators', []) for p in pages}, issues, table_ids)
     cleaned = flow._remove_furniture(without_notes)
+    timings['classify_notes_and_furniture'] = perf_counter() - stage
+    stage = perf_counter()
     blocks = []
     transitions = []
     previous_lines = []
     previous_page = None
+    marker_data = {}
+    if engine in ("marker", "auto"):
+        targets = [p for p in pages
+                   if p['status'] == 'text'
+                   and (engine == "marker"
+                        or bool(p["column_split"] or p["tables"] or p["math"] or p['table_hint']))]
+        if targets:
+            from marker_adapter import marker_batch_json
+            try:
+                marker_data = marker_batch_json(source, targets, review_dir)
+            except Exception as exc:
+                issues.append({"code": "engine_failure", "page": targets[0]["page"], "severity": "warning",
+                               "message": f"Marker batch failed; geometry draft requires review: {exc}"})
+    timings['layout_engine'] = perf_counter() - stage
+    stage = perf_counter()
     for page, (_, note_lines), kept in zip(pages, without_notes, cleaned):
         if page['rotated_glyphs']:
             issues.append({'code': 'rotated_text', 'page': page['page'], 'severity': 'warning',
@@ -188,13 +253,12 @@ def convert_pdf(source: Path, engine: str, review_dir: Path,
                 ledger.append({"page": page["page"], "source_id": line.source_id,
                                "reason": "footnote_reference", "before": original.text, "after": line.text})
         page["kept_lines"] = kept
-        complex_page = bool(page["column_split"] or page["tables"] or page["math"] or page['table_hint'])
         page["engine"] = "windows-ocr" if page['status'] == 'ocr' else "geometry"
         current = []
-        if page['status'] == 'text' and (engine == "marker" or (engine == "auto" and complex_page)):
-            from marker_adapter import marker_page
+        if page['page'] in marker_data:
+            from marker_adapter import blocks_from_page
             try:
-                current = marker_page(source, page, review_dir)
+                current = blocks_from_page(marker_data[page['page']], page)
                 page["engine"] = "marker"
             except Exception as exc:
                 issues.append({"code": "engine_failure", "page": page["page"], "severity": "warning",
@@ -257,12 +321,16 @@ def convert_pdf(source: Path, engine: str, review_dir: Path,
             adjacent = page["page"] == previous_page["page"] + 1
             joinable = (adjacent and previous_lines and kept and blocks and current
                         and blocks[-1]["kind"] in ("paragraph", "heading")
+                        and bool(blocks[-1].get('quote')) == bool(current[0].get('quote'))
                         and (current[0]["kind"] == blocks[-1]["kind"]
                              or (blocks[-1]["kind"] == "heading" and kept[0].bold)))
             if joinable and flow._join_pages(previous_lines[-1], kept, previous_page["height"], page["height"]):
                 last = blocks[-1]
                 last["text"] = flow._join_text(last["text"], current[0]["text"])
-                last["markdown"] = flow._join_text(last["markdown"], current[0]["markdown"])
+                next_markdown = current[0]['markdown']
+                if last.get('quote') and next_markdown.startswith('> '):
+                    next_markdown = next_markdown[2:]
+                last["markdown"] = flow._join_text(last["markdown"], next_markdown)
                 last["source_ids"] += current[0]["source_ids"]
                 last["pages"] = sorted(set(last["pages"] + current[0]["pages"]))
                 current = current[1:]
@@ -291,7 +359,9 @@ def convert_pdf(source: Path, engine: str, review_dir: Path,
                            "message": "Nonblank page has no recovered text. Partial output must be identified."})
         blocks.extend(current)
         previous_lines, previous_page = kept, page
+    timings['reconstruct'] = perf_counter() - stage
     bundle = {"schema_version": 1, "source": str(source.resolve()),
+              "timings_seconds": {k: round(v, 6) for k, v in timings.items()},
               "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(), "pages": [], "blocks": blocks,
               "deletions": ledger, "transitions": transitions, "issues": issues}
     for page in pages:

@@ -29,9 +29,18 @@ No-text PDF pages are rendered locally and recognized with installed Windows OCR
 
 The default `-Engine auto` uses the existing geometry-aware text path for simple pages and evaluates local Marker 2.2.0 candidates for detected columns, tables or formulas. It rejects prose candidates that lose retained lines or change their order. `-Engine geometry` and `-Engine marker` are diagnostic options. Engine failures produce review findings and retain an auditable fallback draft. JSON results record the engine actually selected for every page.
 
-The Windows wrapper uses `D:\CodexTools\markitdown\.venv` for conversion and audit, and runs Marker in a subprocess under `D:\CodexTools\pdf-layout\.venv`. The two environments isolate incompatible Pillow requirements. Models and the rendering font were initialized under `D:\CodexTools\pdf-layout\cache`. Subsequent conversions use cached models offline, with temporary inference artifacts in the review directory. A missing model/environment is an environment failure and must be reported as such. Native Windows OCR uses `powershell.exe`/WinRT; no converter skill or external OCR service is required. DOCX native footnotes are removed from a private copy before official MarkItDown extraction; other Office/HTML formats retain the upstream conversion path.
+The Windows wrapper uses `D:\CodexTools\markitdown\.venv` for conversion and audit, and runs Marker in batched subprocesses under `D:\CodexTools\pdf-layout\.venv`, loading the models once per batch rather than once per page. The two environments isolate incompatible Pillow requirements. Models and the rendering font were initialized under `D:\CodexTools\pdf-layout\cache`. Subsequent conversions use cached models offline, with temporary inference artifacts in the review directory. A missing model/environment is an environment failure and must be reported as such. Native Windows OCR uses `powershell.exe`/WinRT; no converter skill or external OCR service is required. DOCX native footnotes are removed from a private copy before official MarkItDown extraction; other Office/HTML formats retain the upstream conversion path.
 
 Use a separate source and output. Provide an explicit review directory under the task's work area. Keep the input intact and put the verified Markdown in the requested output location.
+
+After PDF conversion, prepare the review evidence and Markdown preview with the bundled command instead of probing for Node packages or writing one-off rendering scripts:
+
+```powershell
+# Run in PowerShell 7. ReviewDir must contain the completed source.json.
+& <skill-directory>\scripts\prepare_review.ps1 -ReviewDir <work-review-directory> -MarkdownPath <draft.md> -Screenshot -BrowserNoSandbox
+```
+
+This creates `review-context.json`, source-page PNGs/contact sheets, local HTML previews, a sample Markdown screenshot and `review.template.json`. It never records inspection or overwrites `review.json`. Read [review-workflow.md](references/review-workflow.md) for page selection, this machine's restricted-browser option, review/hash handling and timing comparisons. The Python conversion writes `timings.json`; this is program time, separate from the elapsed time spent inspecting and correcting the document.
 
 ## Text and structure contract
 
@@ -50,11 +59,11 @@ Read [references/conversion-rules.md](references/conversion-rules.md) when handl
 
 ## Default verification
 
-1. Convert the whole source. Read `source.json` and `audit.json` under the review directory. They identify original pages and retained lines, selected engines, deleted content, transitions and findings.
+1. Convert the whole source. Read the compact `review-context.json` summary plus `audit.json`; consult `source.json` for detailed provenance. They identify original pages and retained lines, selected engines, deleted content, transitions and findings. Source accounting must cover every raw line as retained or explicitly deleted, with no overlap. Every page containing removed footnotes remains a review candidate: full retained-line coverage does not prove that a deletion was justified.
 2. Inspect every automatic finding. Render only the necessary source regions and surrounding context for uncertain boundaries, OCR, references, tables or formulas. Use the page/line IDs in the reports. Correct only what the source supports and keep file-specific corrections with that file.
 3. Sample the first/last pages and representative other pages, including distinct layouts. Prefer additional unflagged pages so sampling supplements targeted review. If a sample reveals a recurring defect, check the same pattern throughout the document and expand targeted review.
 4. Inspect representative rendered Markdown, including literal numbering, omission marks, table structure and math syntax, with an available preview/rendering tool. Recoverable problems must be corrected before delivery. Record irrecoverable text, unsupported formulas or unreadable source content explicitly.
-5. Record actual targeted locations, sampled pages and findings resolved in `review.json`. Use this schema; hashes must describe the current source and final Markdown:
+5. Fill the generated `review.template.json` and save it as `review.json` only after inspection. Record actual targeted locations, sampled pages and findings resolved. Source/output hashes are SHA-256 of the exact current file bytes, including the Markdown file's newline encoding. Regenerate the template after output edits without replacing completed review evidence blindly. Use this schema:
 
 ```json
 {

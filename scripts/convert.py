@@ -5,9 +5,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from time import perf_counter
 
 
 def write_output(target: Path, markdown: str, force: bool):
+    markdown = markdown.replace('\r\n', '\n').replace('\r', '\n')
     target.parent.mkdir(parents=True, exist_ok=True)
     if not force:
         with target.open('x', encoding='utf-8', newline='\n') as file:
@@ -24,6 +26,8 @@ def write_output(target: Path, markdown: str, force: bool):
 
 
 def main():
+    started = perf_counter()
+    timings = {}
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('input', type=Path)
     parser.add_argument('output', type=Path, nargs='?')
@@ -54,8 +58,11 @@ def main():
         from pdf_pipeline import convert_pdf
         from audit import audit
         bundle = convert_pdf(source, args.engine, review_dir, args.ocr_language, not args.no_ocr)
+        timings.update(bundle.get('timings_seconds', {}))
         markdown = '\n\n'.join(b['markdown'] for b in bundle['blocks']).strip() + '\n'
+        stage = perf_counter()
         checked = audit(bundle, markdown, review_dir)
+        timings['audit'] = round(perf_counter() - stage, 6)
         result.update(status=checked['extraction_status'], review_status=checked['status'],
                       unreadable_pages=checked['unreadable_pages'], pages=checked['page_count'],
                       page_status={p['page']: p['status'] for p in bundle['pages']})
@@ -85,11 +92,17 @@ def main():
         target = args.output.with_suffix('.partial.md') if result['status'] == 'partial' else args.output
         if target.resolve() == source:
             raise ValueError('Output must differ from input')
+        stage = perf_counter()
         write_output(target, markdown, args.force)
+        timings['write_markdown'] = round(perf_counter() - stage, 6)
         result['output'] = str(target.resolve())
     elif args.chat and result['status'] == 'complete':
         from text_restore import wrap_for_chat
         sys.stdout.write(wrap_for_chat(markdown))
+    if suffix == '.pdf':
+        timings['total'] = round(perf_counter() - started, 6)
+        result['timings_seconds'] = timings
+        (review_dir / 'timings.json').write_text(json.dumps(timings, indent=2), encoding='utf-8', newline='\n')
     print(json.dumps(result, ensure_ascii=False), file=sys.stderr)
     return 2 if result['status'] in ('partial', 'empty') or result['review_status'] == 'failed' else 0
 

@@ -12,12 +12,14 @@ from pdf_pipeline import canonical
 
 def plain(text: str) -> str:
     text = re.sub(r"(?m)^\s*(?:#{1,6}\s+|>\s*)", "", text)
-    text = re.sub(r"\\([.*\[\]|])", r"\1", text)
+    text = re.sub(r"\\([.*\[\]|$])", r"\1", text)
     text = re.sub(r"(?m)^\|(?:\s*:?-+:?\s*\|)+\s*$", "", text)
     return text
 
 
-def audit(bundle: dict, markdown: str, review_dir: Path) -> dict:
+def audit(bundle: dict, markdown: str, review_dir: Path, *, output_sha256=None) -> dict:
+    fingerprint = output_sha256 or hashlib.sha256(markdown.encode('utf-8')).hexdigest()
+    markdown = markdown.replace('\r\n', '\n').replace('\r', '\n')
     findings = list(bundle["issues"])
     def add(code, message, page=None, severity="warning", **extra):
         findings.append({"code": code, "message": message, "page": page, "severity": severity, **extra})
@@ -30,6 +32,28 @@ def audit(bundle: dict, markdown: str, review_dir: Path) -> dict:
             expected_characters=len(canonical(plain(expected))),
             actual_characters=len(canonical(plain(markdown))))
     assigned = Counter(sid for block in bundle["blocks"] for sid in block["source_ids"])
+    raw_ids = {l['source_id'] for p in bundle['pages'] for l in p['lines']}
+    kept_ids = {l['source_id'] for p in bundle['pages'] for l in p['kept_lines']}
+    removed_ids = {d['source_id'] for d in bundle['deletions']
+                   if d.get('source_id') and d['reason'] != 'footnote_reference'}
+    unaccounted = raw_ids - kept_ids - removed_ids
+    conflicting = kept_ids & removed_ids
+    unknown = (kept_ids | removed_ids | set(assigned)) - raw_ids
+    removed_counts = Counter(d['source_id'] for d in bundle['deletions']
+                             if d.get('source_id') and d['reason'] != 'footnote_reference')
+    duplicate_deleted = sorted(sid for sid, count in removed_counts.items() if count > 1)
+    if unaccounted or conflicting or unknown or duplicate_deleted:
+        add('source_partition', 'Every original line must be retained or explicitly deleted, exactly once.',
+            severity='error', missing=sorted(unaccounted), conflicting=sorted(conflicting),
+            unknown=sorted(unknown), duplicate_deleted=duplicate_deleted)
+    for page in bundle['pages']:
+        deleted = [d for d in bundle['deletions'] if d.get('page') == page['page'] and d['reason'] == 'footnote']
+        if deleted:
+            add('footnote_deletion', 'Verify all removed note text against the source; line coverage alone cannot prove a deletion was justified.',
+                page['page'], source_ids=[d['source_id'] for d in deleted if d.get('source_id')])
+        prose = [b for b in bundle['blocks'] if b['pages'][0] == page['page'] and b['kind'] == 'paragraph']
+        if len(prose) >= 10 and sum(len(b['source_ids']) == 1 for b in prose) / len(prose) > .8:
+            add('fragmented_paragraphs', 'Most prose blocks contain one source line; verify line spacing and paragraph reconstruction.', page['page'])
     page_coverage = []
     for page in bundle["pages"]:
         lines = page["kept_lines"]
@@ -98,7 +122,7 @@ def audit(bundle: dict, markdown: str, review_dir: Path) -> dict:
             columns = [len(re.split(r"(?<!\\)\|", r)) for r in rows]
             if columns and len(set(columns)) > 1:
                 add("table_columns", "Markdown table row widths differ.", page, "error", block=index)
-        if block["kind"] == "formula" or "$" in md:
+        if block["kind"] == "formula" or re.search(r'(?<!\\)\$', md):
             formulas += 1
             dollars = re.findall(r"(?<!\\)\$", md)
             if len(dollars) % 2:
@@ -131,7 +155,6 @@ def audit(bundle: dict, markdown: str, review_dir: Path) -> dict:
             sample.append(selected)
     review_file = review_dir / "review.json"
     review = json.loads(review_file.read_text(encoding="utf-8")) if review_file.exists() else {}
-    fingerprint = hashlib.sha256(markdown.encode()).hexdigest()
     verified = (review.get("output_sha256") == fingerprint
                 and review.get("source_sha256") == bundle["source_sha256"]
                 and {1, count}.issubset(set(review.get('sample_pages', [])))
@@ -148,12 +171,15 @@ def audit(bundle: dict, markdown: str, review_dir: Path) -> dict:
               "page_count": count, "page_coverage": page_coverage, "block_count": len(bundle["blocks"]),
               "extraction_status": 'partial' if any(p.get('status') == 'unreadable' for p in bundle['pages']) else 'complete',
               "unreadable_pages": [p['page'] for p in bundle['pages'] if p.get('status') == 'unreadable'],
+              "source_accounting": {"raw_lines": len(raw_ids), "retained_lines": len(kept_ids),
+                                    "deleted_lines": len(removed_ids), "unaccounted_lines": len(unaccounted),
+                                    "conflicting_lines": len(conflicting)},
               "table_count": tables, "formula_blocks": formulas, "findings": findings,
               "transitions": bundle["transitions"], "deletions": dict(Counter(d["reason"] for d in bundle["deletions"])),
               "sample_pages": sorted(set(sample)), "review": review if verified else {},
               "limitations": ["Checks are candidate detection, not proof of semantic fidelity.",
                               "Source-image review covers logged locations and samples, not every page."]}
-    (review_dir / "audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    (review_dir / "audit.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8", newline='\n')
     return result
 
 
@@ -163,6 +189,8 @@ if __name__ == "__main__":
     parser.add_argument("markdown", type=Path)
     args = parser.parse_args()
     bundle = json.loads((args.review_dir / "source.json").read_text(encoding="utf-8"))
-    result = audit(bundle, args.markdown.read_text(encoding="utf-8"), args.review_dir)
+    raw_output = args.markdown.read_bytes()
+    result = audit(bundle, raw_output.decode('utf-8-sig'), args.review_dir,
+                   output_sha256=hashlib.sha256(raw_output).hexdigest())
     print(json.dumps({k: result[k] for k in ("status", "page_count", "block_count", "deletions")}, ensure_ascii=False))
     raise SystemExit(2 if result["status"] == "failed" else 0)
